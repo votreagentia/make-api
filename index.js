@@ -69,9 +69,11 @@ app.get('/capture-email', (req, res) => {
     </head>
     <body>
       <div class="container">
-        <h1>Confirmez votre adresse e-mail</h1>
+        <h1>Confirmez votre nom et votre adresse e-mail</h1>
         <form action="/submit-email" method="POST">
           <input type="hidden" name="clientKey" value="${clientKey}">
+          <label for="nom">Entrez votre nom :</label><br>
+          <input type="nom" id="nom" name="nom" required><br><br>
           <label for="email">Entrez votre e-mail :</label><br>
           <input type="email" id="email" name="email" required><br><br>
           <button type="submit">Confirmer</button>
@@ -84,9 +86,9 @@ app.get('/capture-email', (req, res) => {
 
 // Route pour traiter l'envoi de l'email
 app.post('/submit-email', (req, res) => {
-  const { clientKey, email } = req.body;
+  const { clientKey, nom, email } = req.body;
 
-  if (!clientKey || !email) {
+  if (!clientKey || !email || !nom) {
     return res.status(400).send('Informations manquantes.');
   }
 
@@ -96,6 +98,7 @@ app.post('/submit-email', (req, res) => {
 
   axios.post(webhookUrl, {
     clientKey,
+    nom,
     email
   })
   .then(() => {
