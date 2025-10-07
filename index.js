@@ -242,7 +242,7 @@ app.post('/submit-email', (req, res) => {
       <body>
         <div class="container">
           <h1>Votre demande a bien été prise en compte 🎉</h1>
-          <p>Vous allez recevoir un e-mail de confirmation très bientôt.</p>
+          <p>Vous allez recevoir un message de confirmation très bientôt.</p>
         </div>
       </body>
       </html>
