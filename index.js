@@ -292,7 +292,7 @@ app.get('/capture-email', (req, res) => {
         <form id="reservationForm" action="/submit-email" method="POST" novalidate>
           <input type="hidden" name="clientKey" value="${escapeHtml(clientKey)}">
 
-          <label for="prenom">Prénom :</label>
+          <label for="prenom">Entrez votre Prénom :</label>
           <input type="text" id="prenom" name="prenom" value="${escapeHtml(prenomKey)}" required>
 
           <label for="nom">Entrez votre nom :</label>
