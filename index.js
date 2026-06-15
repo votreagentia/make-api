@@ -8,7 +8,8 @@ const PORT = process.env.PORT || 5000;
 // Middleware
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Petite fonction utilitaire pour échapper les valeurs injectées dans le HTML
+// Petite fonction utilitaire pour échapper les caractères spéciaux HTML
+// (évite tout souci d'affichage si le prénom contient une apostrophe, un guillemet, etc.)
 function escapeHtml(value) {
   if (value === undefined || value === null) return '';
   return String(value)
@@ -17,6 +18,41 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// Convertit une date au format français "16 juin 2026 20:00" en objet Date.
+// Renvoie null si le format ne correspond pas.
+const MOIS_FR = {
+  'janvier': 0, 'février': 1, 'fevrier': 1, 'mars': 2, 'avril': 3, 'mai': 4, 'juin': 5,
+  'juillet': 6, 'août': 7, 'aout': 7, 'septembre': 8, 'octobre': 9, 'novembre': 10,
+  'décembre': 11, 'decembre': 11
+};
+
+function parseFrenchDate(str) {
+  if (!str) return null;
+  const match = String(str).trim().match(
+    /^(\d{1,2})\s+([a-zàâäéèêëîïôöùûüÿç]+)\s+(\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/i
+  );
+  if (!match) return null;
+
+  const day = parseInt(match[1], 10);
+  const monthName = match[2].toLowerCase();
+  const year = parseInt(match[3], 10);
+  const hour = match[4] ? parseInt(match[4], 10) : 0;
+  const minute = match[5] ? parseInt(match[5], 10) : 0;
+
+  if (!(monthName in MOIS_FR)) return null;
+
+  const d = new Date(year, MOIS_FR[monthName], day, hour, minute, 0);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Formate une date en chaîne locale "YYYY-MM-DDTHH:mm:00" (sans "Z"),
+// pour que le navigateur l'interprète comme une heure locale, sans décalage de fuseau.
+function formatLocalISO(d) {
+  const pad = (n) => (n < 10 ? '0' + n : '' + n);
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+    'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':00';
 }
 
 // Route pour afficher le formulaire
@@ -29,13 +65,21 @@ app.get('/capture-email', (req, res) => {
     return res.status(400).send("Clé client manquante.");
   }
 
-  // Valeur initiale de la date de RDV transmise au script côté client,
-  // assainie pour ne pas casser le template literal ni le tag <script>.
-  const initialDateJson = JSON.stringify(DateHeureDernierRDVKey || '')
-    .replace(/</g, '\\u003c')
-    .replace(/>/g, '\\u003e')
-    .replace(/`/g, '\\u0060')
-    .replace(/\$/g, '\\u0024');
+  // On essaie de convertir la date reçue (ex: "16 juin 2026 20:00") pour pré-sélectionner l'agenda
+  let initialDateISO = null;
+  if (DateHeureDernierRDVKey) {
+    let parsedDate = parseFrenchDate(DateHeureDernierRDVKey);
+    if (!parsedDate) {
+      // Repli : on tente le format JS standard (ISO 8601, etc.)
+      const fallback = new Date(DateHeureDernierRDVKey);
+      if (!isNaN(fallback.getTime())) parsedDate = fallback;
+    }
+    if (parsedDate) {
+      initialDateISO = formatLocalISO(parsedDate);
+    }
+  }
+  // Sécurisation de la chaîne injectée dans le <script> (évite toute fermeture anticipée de balise)
+  const initialDateJSON = JSON.stringify(initialDateISO).replace(/</g, '\\u003c');
 
   res.send(`
     <!DOCTYPE html>
@@ -96,20 +140,37 @@ app.get('/capture-email', (req, res) => {
         .form-error { color: red; font-size: 1rem; margin-top: 15px; text-align: center; }
         .invalid { border: 2px solid red !important; }
 
-        /* Champ "date et heure du RDV" */
-        #dateRdvDisplay {
-          background-color: #ffffff;
+        /* ---------- Champ "Date et heure du RDV" ---------- */
+        .date-field-wrapper {
+          position: relative;
+          width: 100%;
+          margin: 10px 0;
+          box-sizing: border-box;
+        }
+        .date-field-wrapper input {
+          width: 100%;
+          margin: 0;
+          padding-right: 40px;
           cursor: pointer;
+          background-color: #fff;
+        }
+        .date-field-wrapper .calendar-icon {
+          position: absolute;
+          right: 12px;
+          top: 50%;
+          transform: translateY(-50%);
+          font-size: 1.1rem;
+          pointer-events: none;
         }
 
-        /* Agenda / sélecteur de date et heure */
+        /* ---------- Agenda personnalisé ---------- */
         .picker-overlay {
-          display: flex;
           position: fixed;
           top: 0; left: 0; right: 0; bottom: 0;
-          background-color: rgba(70, 130, 180, 0.35);
-          justify-content: center;
+          background: rgba(0, 0, 0, 0.45);
+          display: flex;
           align-items: center;
+          justify-content: center;
           z-index: 1000;
           padding: 16px;
           box-sizing: border-box;
@@ -117,87 +178,72 @@ app.get('/capture-email', (req, res) => {
         .picker-overlay.hidden { display: none; }
 
         .picker-modal {
-          background-color: #ffffff;
-          border-radius: 10px;
-          box-shadow: 0px 4px 12px rgba(0,0,0,0.2);
+          background: #ffffff;
+          border-radius: 12px;
+          box-shadow: 0px 6px 20px rgba(0, 0, 0, 0.25);
           width: 320px;
           max-width: 100%;
-          padding: 1.2em;
-          text-align: center;
+          padding: 16px;
           box-sizing: border-box;
-        }
-
-        .picker-title {
-          margin: 0 0 14px;
-          font-size: 1rem;
-          font-weight: bold;
-          color: #4682b4;
         }
 
         .picker-header {
           display: flex;
-          justify-content: space-between;
           align-items: center;
-          margin-bottom: 10px;
+          justify-content: space-between;
+          margin: 0 0 10px 0;
         }
-        .picker-header .month-label {
+        .picker-header button {
+          background-color: #4682b4;
+          color: #fff;
+          border: none;
+          border-radius: 50%;
+          width: 32px;
+          height: 32px;
+          min-width: 32px;
+          margin: 0;
+          padding: 0;
+          font-size: 1.2rem;
+          line-height: 1;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+        }
+        .picker-header button:hover { background-color: #5a9bd4; }
+        .picker-header span {
           font-weight: bold;
           color: #4682b4;
           text-transform: capitalize;
-          font-size: 1rem;
         }
-        .picker-nav {
-          background-color: #f0f8ff;
-          color: #4682b4;
-          border: 1px solid #b0c4de;
-          border-radius: 5px;
-          width: 36px;
-          height: 36px;
-          min-width: 36px;
-          font-size: 1.1rem;
-          line-height: 1;
-          cursor: pointer;
-          margin: 0;
-          padding: 0;
-        }
-        .picker-nav:hover { background-color: #e0eefc; }
 
-        .picker-weekdays, .picker-days {
+        .picker-weekdays,
+        .picker-days {
           display: grid;
           grid-template-columns: repeat(7, 1fr);
-          gap: 4px;
-        }
-        .picker-weekdays {
-          margin-bottom: 4px;
-        }
-        .picker-weekdays span {
-          font-size: 0.75rem;
-          color: #888;
+          gap: 2px;
           text-align: center;
-          text-transform: uppercase;
         }
-        .picker-days { margin-bottom: 14px; }
-        .picker-day {
-          background: none;
-          border: 1px solid transparent;
+        .picker-weekdays div {
+          font-size: 0.75rem;
+          font-weight: bold;
+          color: #888;
+          padding: 4px 0;
+        }
+        .picker-days div {
+          padding: 8px 0;
           border-radius: 50%;
-          width: 36px;
-          height: 36px;
-          line-height: 36px;
-          margin: 0 auto;
-          padding: 0;
+          cursor: pointer;
           font-size: 0.9rem;
           color: #333;
-          text-align: center;
-          cursor: pointer;
         }
-        .picker-day:hover { background-color: #f0f8ff; }
-        .picker-day.empty { cursor: default; visibility: hidden; }
-        .picker-day.today { border-color: #4682b4; }
-        .picker-day.selected {
+        .picker-days div:hover { background-color: #e6f0fa; }
+        .picker-days div.other-month { color: #cfcfcf; cursor: default; }
+        .picker-days div.other-month:hover { background-color: transparent; }
+        .picker-days div.today { border: 1px solid #4682b4; }
+        .picker-days div.selected {
           background-color: #4682b4;
-          border-color: #4682b4;
-          color: #ffffff;
+          color: #fff;
           font-weight: bold;
         }
 
@@ -206,52 +252,37 @@ app.get('/capture-email', (req, res) => {
           align-items: center;
           justify-content: center;
           gap: 8px;
-          margin: 0 0 16px;
+          margin: 14px 0 4px;
         }
         .picker-time label {
+          display: inline-block;
           width: auto;
           margin: 0;
-          font-size: 0.9rem;
-          color: #555;
-        }
-        .picker-time select {
-          width: auto;
-          margin: 0;
-          padding: 8px;
-          font-size: 0.95rem;
-        }
-        .picker-time .time-sep {
           font-weight: bold;
           color: #4682b4;
+        }
+        .picker-time select {
+          display: inline-block;
+          width: auto;
+          margin: 0;
+          padding: 6px 8px;
         }
 
         .picker-actions {
           display: flex;
-          gap: 10px;
+          gap: 8px;
+          margin-top: 14px;
         }
-        .picker-actions .picker-btn {
+        .picker-actions button {
+          margin: 0;
           width: auto;
           flex: 1;
-          margin: 0;
         }
-        .picker-btn.secondary {
-          background-color: #ffffff;
-          color: #4682b4;
-          border: 1px solid #b0c4de;
+        .picker-actions #cancelPicker {
+          background-color: #e6e6e6;
+          color: #555;
         }
-        .picker-btn.secondary:hover { background-color: #f0f8ff; }
-
-        @media (max-width: 480px) {
-          .picker-overlay { align-items: flex-end; padding: 0; }
-          .picker-modal {
-            width: 100%;
-            max-width: 100%;
-            border-radius: 14px 14px 0 0;
-            padding: 1.4em 1em 1.6em;
-          }
-          .picker-day { width: 100%; height: 11vw; max-height: 42px; line-height: 11vw; max-width: none; }
-          .picker-day.empty { line-height: normal; }
-        }
+        .picker-actions #cancelPicker:hover { background-color: #d4d4d4; }
       </style>
     </head>
     <body>
@@ -261,7 +292,7 @@ app.get('/capture-email', (req, res) => {
         <form id="reservationForm" action="/submit-email" method="POST" novalidate>
           <input type="hidden" name="clientKey" value="${escapeHtml(clientKey)}">
 
-          <label for="prenom">Entrez votre prénom :</label>
+          <label for="prenom">Prénom :</label>
           <input type="text" id="prenom" name="prenom" value="${escapeHtml(prenomKey)}" required>
 
           <label for="nom">Entrez votre nom :</label>
@@ -270,10 +301,12 @@ app.get('/capture-email', (req, res) => {
           <label for="email">Entrez votre e-mail :</label>
           <input type="email" id="email" name="email" required>
 
-          <label for="dateRdvDisplay">Date et heure du rendez-vous :</label>
-          <input type="text" id="dateRdvDisplay" name="dateRdvDisplay" readonly required
-                 placeholder="Sélectionnez une date et une heure">
-          <input type="hidden" id="dateRdvValue" name="dateRdv">
+          <label for="dateRdv">Date et heure du rendez-vous :</label>
+          <div class="date-field-wrapper">
+            <input type="text" id="dateRdv" name="dateRdvAffichage" readonly placeholder="Sélectionnez une date et une heure">
+            <span class="calendar-icon" aria-hidden="true">📅</span>
+          </div>
+          <input type="hidden" id="dateRdvISO" name="dateRdvISO" value="">
 
           <label for="typeRsv">Type de réservation :</label>
           <select id="typeRsv" name="typeRsv" required>
@@ -299,37 +332,36 @@ app.get('/capture-email', (req, res) => {
         </form>
       </div>
 
-      <!-- Agenda / sélecteur de date et heure -->
+      <!-- Agenda personnalisé pour la date et l'heure du RDV -->
       <div id="datePickerOverlay" class="picker-overlay hidden">
-        <div class="picker-modal" role="dialog" aria-label="Sélecteur de date et heure">
-          <p class="picker-title">Choisissez une date et une heure</p>
+        <div class="picker-modal" role="dialog" aria-modal="true" aria-label="Sélection de la date et de l'heure du rendez-vous">
           <div class="picker-header">
-            <button type="button" id="prevMonthBtn" class="picker-nav" aria-label="Mois précédent">&lsaquo;</button>
-            <span id="monthYearLabel" class="month-label"></span>
-            <button type="button" id="nextMonthBtn" class="picker-nav" aria-label="Mois suivant">&rsaquo;</button>
+            <button type="button" id="prevMonth" aria-label="Mois précédent">‹</button>
+            <span id="monthYearLabel"></span>
+            <button type="button" id="nextMonth" aria-label="Mois suivant">›</button>
           </div>
-          <div class="picker-weekdays">
-            <span>Lun</span><span>Mar</span><span>Mer</span><span>Jeu</span><span>Ven</span><span>Sam</span><span>Dim</span>
-          </div>
-          <div id="calendarDays" class="picker-days"></div>
+          <div class="picker-weekdays" id="pickerWeekdays"></div>
+          <div class="picker-days" id="pickerDays"></div>
           <div class="picker-time">
-            <label for="hourSelect">Heure</label>
-            <select id="hourSelect"></select>
-            <span class="time-sep">:</span>
-            <select id="minuteSelect"></select>
+            <label for="pickerHour">Heure :</label>
+            <select id="pickerHour"></select>
+            <span>:</span>
+            <select id="pickerMinute"></select>
           </div>
           <div class="picker-actions">
-            <button type="button" id="cancelPickerBtn" class="picker-btn secondary">Annuler</button>
-            <button type="button" id="confirmPickerBtn" class="picker-btn primary">OK</button>
+            <button type="button" id="cancelPicker">Annuler</button>
+            <button type="button" id="confirmPicker">OK</button>
           </div>
         </div>
       </div>
 
       <script>
         const form = document.getElementById('reservationForm');
-        const prenomInput = document.getElementById('prenom');
+        const prenom = document.getElementById('prenom');
         const nom = document.getElementById('nom');
         const emailInput = document.getElementById('email');
+        const dateRdv = document.getElementById('dateRdv');
+        const dateRdvISO = document.getElementById('dateRdvISO');
         const typeRsv = document.getElementById('typeRsv');
         const nbrePersonneDiv = document.getElementById('nbrePersonneDiv');
         const nbrePersonne = document.getElementById('nbrePersonne');
@@ -337,8 +369,6 @@ app.get('/capture-email', (req, res) => {
         const commentaire = document.getElementById('commentaire');
         const charCounter = document.getElementById('charCounter');
         const formError = document.getElementById('formError');
-        const dateRdvDisplay = document.getElementById('dateRdvDisplay');
-        const dateRdvValue = document.getElementById('dateRdvValue');
 
         typeRsv.addEventListener('change', () => {
           if (typeRsv.value === 'simple') {
@@ -376,20 +406,20 @@ app.get('/capture-email', (req, res) => {
           document.querySelectorAll('input, select, textarea').forEach(el => el.classList.remove('invalid'));
           formError.classList.add('hidden');
 
-          const prenomVal = prenomInput.value.trim();
+          const prenomVal = prenom.value.trim();
           const nomVal = nom.value.trim();
           const emailVal = emailInput.value.trim();
+          const dateRdvVal = dateRdvISO.value ? dateRdvISO.value.trim() : '';
           const typeVal = typeRsv.value;
           const nbreVal = nbrePersonne.value ? nbrePersonne.value.trim() : '';
           const commentVal = commentaire.value ? commentaire.value.trim() : '';
-          const dateVal = dateRdvValue.value;
 
           let missingField = false;
 
-          if (!prenomVal) { missingField = true; prenomInput.classList.add('invalid'); }
+          if (!prenomVal) { missingField = true; prenom.classList.add('invalid'); }
           if (!nomVal) { missingField = true; nom.classList.add('invalid'); }
           if (!emailVal) { missingField = true; emailInput.classList.add('invalid'); }
-          if (!dateVal) { missingField = true; dateRdvDisplay.classList.add('invalid'); }
+          if (!dateRdvVal) { missingField = true; dateRdv.classList.add('invalid'); }
           if (!typeVal) { missingField = true; typeRsv.classList.add('invalid'); }
           if ((typeVal === 'simple' || typeVal === 'privatisation') && !nbreVal) {
             missingField = true; nbrePersonne.classList.add('invalid');
@@ -405,127 +435,156 @@ app.get('/capture-email', (req, res) => {
           }
         });
 
-        // ----- Agenda / sélecteur de date et heure -----
+        /* ===================== Agenda personnalisé ===================== */
         (function () {
           const overlay = document.getElementById('datePickerOverlay');
           const monthYearLabel = document.getElementById('monthYearLabel');
-          const calendarDaysEl = document.getElementById('calendarDays');
-          const hourSelect = document.getElementById('hourSelect');
-          const minuteSelect = document.getElementById('minuteSelect');
-          const prevMonthBtn = document.getElementById('prevMonthBtn');
-          const nextMonthBtn = document.getElementById('nextMonthBtn');
-          const cancelPickerBtn = document.getElementById('cancelPickerBtn');
-          const confirmPickerBtn = document.getElementById('confirmPickerBtn');
+          const pickerWeekdays = document.getElementById('pickerWeekdays');
+          const pickerDays = document.getElementById('pickerDays');
+          const pickerHour = document.getElementById('pickerHour');
+          const pickerMinute = document.getElementById('pickerMinute');
+          const prevMonthBtn = document.getElementById('prevMonth');
+          const nextMonthBtn = document.getElementById('nextMonth');
+          const confirmBtn = document.getElementById('confirmPicker');
+          const cancelBtn = document.getElementById('cancelPicker');
 
-          const WEEKDAY_NAMES = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
-          const MONTH_NAMES = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+          const moisNoms = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
+          const joursNoms = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'];
 
-          const initialDateRaw = ${initialDateJson};
+          const initialIso = ${initialDateJSON};
+
+          // Date actuellement sélectionnée (validée par OK)
+          let selectedDate = new Date();
+          if (initialIso) {
+            const d = new Date(initialIso);
+            if (!isNaN(d.getTime())) {
+              selectedDate = d;
+            }
+          }
+
+          // Date temporaire utilisée pendant que l'agenda est ouvert
+          let tempDate = new Date(selectedDate);
+          // Mois/année affichés dans l'agenda
+          let viewDate = new Date(selectedDate);
 
           function pad(n) {
-            return String(n).padStart(2, '0');
+            return n < 10 ? '0' + n : '' + n;
           }
 
-          function parseInitialDate(value) {
-            if (!value) return null;
-            const parsed = new Date(value);
-            return isNaN(parsed.getTime()) ? null : parsed;
+          function formatDisplay(d) {
+            return pad(d.getDate()) + '/' + pad(d.getMonth() + 1) + '/' + d.getFullYear() + ' à ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
           }
 
-          function roundToNextQuarter(date) {
-            const d = new Date(date);
-            const minutes = d.getMinutes();
-            const remainder = minutes % 15;
-            if (remainder !== 0) {
-              d.setMinutes(minutes + (15 - remainder));
-            }
-            d.setSeconds(0);
-            d.setMilliseconds(0);
-            return d;
+          function formatISO(d) {
+            return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':00';
           }
 
-          function formatDisplayDate(date) {
-            return WEEKDAY_NAMES[date.getDay()] + ' ' + pad(date.getDate()) + '/' + pad(date.getMonth() + 1) + '/' + date.getFullYear() + ' à ' + pad(date.getHours()) + 'h' + pad(date.getMinutes());
+          function roundToStep(value, step) {
+            const rounded = Math.round(value / step) * step;
+            return rounded >= 60 ? 0 : rounded;
           }
 
-          let selectedDate = parseInitialDate(initialDateRaw);
-          let viewDate = selectedDate ? new Date(selectedDate) : new Date();
+          // Initialisation des champs avec la valeur par défaut (ou la valeur précédente du RDV)
+          dateRdv.value = formatDisplay(selectedDate);
+          dateRdvISO.value = formatISO(selectedDate);
 
-          // Remplissage des sélecteurs heure / minute
+          // En-têtes des jours de la semaine (Lun -> Dim)
+          joursNoms.forEach((j) => {
+            const div = document.createElement('div');
+            div.textContent = j;
+            pickerWeekdays.appendChild(div);
+          });
+
+          // Heures : 00 à 23
           for (let h = 0; h < 24; h++) {
             const opt = document.createElement('option');
-            opt.value = String(h);
-            opt.textContent = pad(h) + 'h';
-            hourSelect.appendChild(opt);
+            opt.value = h;
+            opt.textContent = pad(h);
+            pickerHour.appendChild(opt);
           }
-          for (let m = 0; m < 60; m += 15) {
+
+          // Minutes : 00, 05, 10 ... 55
+          for (let m = 0; m < 60; m += 5) {
             const opt = document.createElement('option');
-            opt.value = String(m);
+            opt.value = m;
             opt.textContent = pad(m);
-            minuteSelect.appendChild(opt);
+            pickerMinute.appendChild(opt);
           }
 
           function renderCalendar() {
-            monthYearLabel.textContent = MONTH_NAMES[viewDate.getMonth()] + ' ' + viewDate.getFullYear();
-            calendarDaysEl.innerHTML = '';
+            pickerDays.innerHTML = '';
+            monthYearLabel.textContent = moisNoms[viewDate.getMonth()] + ' ' + viewDate.getFullYear();
 
-            const year = viewDate.getFullYear();
-            const month = viewDate.getMonth();
-            const firstDay = new Date(year, month, 1);
-            let startWeekday = firstDay.getDay();
-            startWeekday = (startWeekday === 0) ? 6 : startWeekday - 1;
-            const daysInMonth = new Date(year, month + 1, 0).getDate();
+            const firstDay = new Date(viewDate.getFullYear(), viewDate.getMonth(), 1);
+            let startOffset = firstDay.getDay() - 1; // 0 = Lundi
+            if (startOffset < 0) startOffset = 6;
+
+            const daysInMonth = new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 0).getDate();
+            const daysInPrevMonth = new Date(viewDate.getFullYear(), viewDate.getMonth(), 0).getDate();
             const today = new Date();
 
-            for (let i = 0; i < startWeekday; i++) {
-              const empty = document.createElement('span');
-              empty.className = 'picker-day empty';
-              calendarDaysEl.appendChild(empty);
+            // Jours du mois précédent (grisés)
+            for (let i = 0; i < startOffset; i++) {
+              const dayNum = daysInPrevMonth - startOffset + 1 + i;
+              const div = document.createElement('div');
+              div.textContent = dayNum;
+              div.classList.add('other-month');
+              pickerDays.appendChild(div);
             }
 
+            // Jours du mois en cours
             for (let day = 1; day <= daysInMonth; day++) {
-              const btn = document.createElement('button');
-              btn.type = 'button';
-              btn.className = 'picker-day';
-              btn.textContent = String(day);
+              const div = document.createElement('div');
+              div.textContent = day;
+              const cellDate = new Date(viewDate.getFullYear(), viewDate.getMonth(), day);
 
-              const thisDate = new Date(year, month, day);
-
-              if (thisDate.toDateString() === today.toDateString()) {
-                btn.classList.add('today');
+              if (cellDate.toDateString() === today.toDateString()) {
+                div.classList.add('today');
               }
-              if (selectedDate && thisDate.toDateString() === selectedDate.toDateString()) {
-                btn.classList.add('selected');
+              if (cellDate.toDateString() === tempDate.toDateString()) {
+                div.classList.add('selected');
               }
 
-              btn.addEventListener('click', () => {
-                const hours = selectedDate ? selectedDate.getHours() : parseInt(hourSelect.value, 10);
-                const minutes = selectedDate ? selectedDate.getMinutes() : parseInt(minuteSelect.value, 10);
-                selectedDate = new Date(year, month, day, hours, minutes);
+              div.addEventListener('click', () => {
+                tempDate = new Date(viewDate.getFullYear(), viewDate.getMonth(), day, tempDate.getHours(), tempDate.getMinutes());
                 renderCalendar();
               });
 
-              calendarDaysEl.appendChild(btn);
+              pickerDays.appendChild(div);
+            }
+
+            // Jours du mois suivant (grisés) pour compléter la grille
+            const totalCells = startOffset + daysInMonth;
+            const remaining = (7 - (totalCells % 7)) % 7;
+            for (let i = 1; i <= remaining; i++) {
+              const div = document.createElement('div');
+              div.textContent = i;
+              div.classList.add('other-month');
+              pickerDays.appendChild(div);
             }
           }
 
           function openPicker() {
-            if (!selectedDate) {
-              selectedDate = roundToNextQuarter(new Date());
-            }
-            viewDate = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1);
-            hourSelect.value = String(selectedDate.getHours());
-            minuteSelect.value = String(Math.floor(selectedDate.getMinutes() / 15) * 15);
+            // On repart de la date actuellement validée
+            tempDate = new Date(selectedDate);
+            viewDate = new Date(selectedDate);
+
+            pickerHour.value = tempDate.getHours();
+            pickerMinute.value = roundToStep(tempDate.getMinutes(), 5);
+
             renderCalendar();
             overlay.classList.remove('hidden');
+            dateRdv.classList.remove('invalid');
+            hideFormError();
           }
 
           function closePicker() {
             overlay.classList.add('hidden');
           }
 
-          dateRdvDisplay.addEventListener('click', openPicker);
-          dateRdvDisplay.addEventListener('focus', openPicker);
+          dateRdv.addEventListener('click', openPicker);
+          dateRdv.addEventListener('focus', openPicker);
+          document.querySelector('.date-field-wrapper .calendar-icon').addEventListener('click', openPicker);
 
           prevMonthBtn.addEventListener('click', () => {
             viewDate.setMonth(viewDate.getMonth() - 1);
@@ -537,41 +596,23 @@ app.get('/capture-email', (req, res) => {
             renderCalendar();
           });
 
-          hourSelect.addEventListener('change', () => {
-            if (selectedDate) selectedDate.setHours(parseInt(hourSelect.value, 10));
-          });
-
-          minuteSelect.addEventListener('change', () => {
-            if (selectedDate) selectedDate.setMinutes(parseInt(minuteSelect.value, 10));
-          });
-
-          cancelPickerBtn.addEventListener('click', closePicker);
+          cancelBtn.addEventListener('click', closePicker);
 
           overlay.addEventListener('click', (e) => {
             if (e.target === overlay) closePicker();
           });
 
-          confirmPickerBtn.addEventListener('click', () => {
-            if (!selectedDate) {
-              selectedDate = new Date(viewDate);
-            }
-            selectedDate.setHours(parseInt(hourSelect.value, 10));
-            selectedDate.setMinutes(parseInt(minuteSelect.value, 10));
-            selectedDate.setSeconds(0);
-            selectedDate.setMilliseconds(0);
+          confirmBtn.addEventListener('click', () => {
+            tempDate.setHours(parseInt(pickerHour.value, 10));
+            tempDate.setMinutes(parseInt(pickerMinute.value, 10));
+            tempDate.setSeconds(0);
 
-            dateRdvDisplay.value = formatDisplayDate(selectedDate);
-            dateRdvValue.value = selectedDate.toISOString();
-            dateRdvDisplay.classList.remove('invalid');
-            hideFormError();
+            selectedDate = new Date(tempDate);
+            dateRdv.value = formatDisplay(selectedDate);
+            dateRdvISO.value = formatISO(selectedDate);
+
             closePicker();
           });
-
-          // Pré-remplissage si une date de RDV a été transmise dans l'URL
-          if (selectedDate) {
-            dateRdvDisplay.value = formatDisplayDate(selectedDate);
-            dateRdvValue.value = selectedDate.toISOString();
-          }
         })();
       </script>
     </body>
@@ -581,9 +622,9 @@ app.get('/capture-email', (req, res) => {
 
 // Route pour traiter l'envoi des données
 app.post('/submit-email', (req, res) => {
-  const { clientKey, prenom, nom, email, typeRsv, nbrePersonne, commentaire, dateRdv } = req.body;
+  const { clientKey, prenom, nom, email, dateRdvAffichage, dateRdvISO, typeRsv, nbrePersonne, commentaire } = req.body;
 
-  if (!clientKey || !prenom || !nom || !email || !typeRsv || !dateRdv) {
+  if (!clientKey || !prenom || !nom || !email || !dateRdvISO || !typeRsv) {
     return res.status(400).send('Informations manquantes.');
   }
 
@@ -594,10 +635,11 @@ app.post('/submit-email', (req, res) => {
     prenom,
     nom,
     email,
+    dateRdvAffichage,
+    dateRdvISO,
     typeRsv,
     nbrePersonne,
-    commentaire,
-    dateRdv
+    commentaire
   })
   .then(() => {
     res.send(`
